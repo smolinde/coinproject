@@ -2,6 +2,8 @@ import torch, torchaudio, os
 import torch.nn as nn
 from torch.utils.data import Dataset
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 class VGGishNetwork(nn.Module):
     def __init__(self, num_classes):
         super(VGGishNetwork, self).__init__()
@@ -42,7 +44,10 @@ class VGGishNetwork(nn.Module):
 class SpikerboxRecordings(Dataset):
 
     def __init__(self, annotations_file, audio_dir, transformation, target_sample_rate, num_samples, device, label_col):
-        self.annotations = pd.read_csv(annotations_file)
+        if isinstance(annotations_file, pd.DataFrame):
+            self.annotations = annotations_file
+        else:
+            self.annotations = pd.read_csv(annotations_file)
         self.audio_dir = audio_dir
         self.device = device
         self.transformation = transformation.to(self.device)
@@ -96,7 +101,7 @@ class SpikerboxRecordings(Dataset):
             log_mel_spectrogram = log_mel_spectrogram[:, :, :width]
         return log_mel_spectrogram
 
-class TrainUtils():
+class TrainTestUtils():
     def __init__(self, num_classes):
         self.num_classes = num_classes
     def _scaled_accuracy(self, output, target, max_distance, device):
@@ -157,3 +162,52 @@ class TrainUtils():
             train_stats[5][epoch] = round(epoch_scaled_accuracy_val, 2)
             print(f'Epoch [{epoch+1}/{epochs}]:\nAvg. Train Loss: {epoch_loss:.7f}, Train Accuracy: {100 * train_accuracy:.2f}%, Scaled Train Accuracy: {epoch_scaled_accuracy_train:.2f}%\nAvg. Valid Loss: {val_loss:.7f}, Valid Accuracy: {100 * val_accuracy:.2f}%, Scaled Valid Accuracy: {epoch_scaled_accuracy_val:.2f}%')
         return train_stats
+        
+    def plot_metrics(self, stats, name, filepath):
+        fig, axes = plt.subplots(3, 1, figsize=(7, 10))
+        epoch_ticks = np.arange(1, len(stats[0])+1)
+        titles = ['Train and Validation Loss', 'Train and Validation Accuracy', 'Train and Validation Scaled Accuracy']
+        metrics = ['Loss', 'Accuracy (%)', 'Scaled Accuracy (%)']
+        for i in range(3):
+            axes[i].plot(epoch_ticks, stats[0 + i], label='Train')
+            axes[i].plot(epoch_ticks, stats[3 + i], label='Validation')
+            axes[i].set_title(titles[i])
+            axes[i].set_xlabel('Epoch')
+            axes[i].set_ylabel(metrics[i])
+            axes[i].legend()
+            axes[i].set_xticks(epoch_ticks)
+        
+        fig.suptitle(f'Train and Validation Metrics for {name.capitalize()} Model', fontsize = 16)
+        plt.tight_layout(rect=[0.05, 0.05, 1, 0.95])
+        plt.savefig(f'{filepath}/train_metrics_{name}.png', dpi = 600)
+        plt.show()
+
+    def evaluate_exam(self, model, test_dl, device):
+        model.eval()
+        with torch.no_grad():
+            test_inputs, test_targets = next(iter(test_dl))
+            test_inputs = test_inputs.to(device)
+            test_outputs = model(test_inputs)
+            _, predicted_val = torch.max(test_outputs, 1)
+            return round(torch.mean(predicted_val.float()).item())
+
+    def test_model(self, model, test_dl, loss_func, device):
+        model.eval()
+        running_test_loss = 0.0
+        running_scaled_accuracy_test = 0.0
+        correct_test = 0
+        total_test = 0
+        with torch.no_grad():
+            for test_inputs, test_targets in test_dl:
+                test_inputs, test_targets = test_inputs.to(device), test_targets.to(device)
+                test_outputs = model(test_inputs)
+                running_test_loss += loss_func(test_outputs, test_targets).item()
+                running_scaled_accuracy_test += self._scaled_accuracy(test_outputs, test_targets, self.num_classes - 1, device)
+                _, predicted_test = torch.max(test_outputs, 1)
+                total_test += test_targets.size(0)
+                correct_test += (predicted_test == test_targets).sum().item()
+            
+        test_loss = running_test_loss / len(test_dl)
+        test_scaled_accuracy = (running_scaled_accuracy_test / len(test_dl)) * 100
+        test_accuracy = correct_test / total_test
+        print(f'[Test Results]\nTest Loss: {test_loss:.7f}, Test Accuracy: {100 * test_accuracy:.2f}%, Scaled Test Accuracy: {test_scaled_accuracy:.2f}%')
